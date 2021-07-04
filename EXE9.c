@@ -1,6 +1,11 @@
-//
-// Smpl_ADC_VR1 : use ADC7 to read Variable Resistor (on-board)
-//
+
+// College: HIT - Holon Institute Of Technology
+// Course: CES - Computer Embedded Systems
+// Course Instructor: DR. Avichai Aharoni
+// File Name: Plant-B - water and shading systems LTD
+// Author: Shahaf Edri & Aviv Aharon
+// Date: 29/06/2021
+
 #include <stdio.h>
 #include <stdbool.h>
 #include <string.h>
@@ -14,7 +19,7 @@
 #include "NUC1xx-LB_002\LCD_Driver.h"
 #include "Driver_PWM_Servo.h"
 
-#define SHADE_PWM_ON 240 // 2.4ms
+#define SHADE_PWM_ON 105 // 2.4ms
 #define SHADE_PWM_OFF 50  // 0.5ms
 
 #define HOUR 10 // TODO - change back to 3600
@@ -42,7 +47,7 @@
 #define TIMEBAR_PREFIX "*t"
 #define SHADEON_PREFIX "B"
 #define SHADEOFF_PREFIX "b"
-#define LIGHT_TOTAL_PREFIX "*S"
+#define LIGHT_CUMULATIVE_PREFIX "*S"
 #define LIGHT_PREFIX "*s"
 #define SLIDER_START_PREFIX "*W"
 #define SLIDER_END_PREFIX "W"
@@ -56,9 +61,12 @@
 #define  CONTINUOUS 3 // keep counting and interrupt when reach TCMPR number
 
 uint32_t Timing_Flag_1s=0;
-
+uint8_t water_period=2;
+uint32_t sampeling_period=1 ;
+int j=0;
 
 // THRESHOLDS light
+#define MAXIMUM_CUMULATIVE_LIGHT_PER_DAY 720000
 #define PEAK_FORBIDDEN_LIGHT 			85 
 #define AVG_FORBIDDEN_LIGHT 			65 
 #define NIGHT_LIGHT								5
@@ -91,7 +99,7 @@ volatile uint8_t uart_input;
 
 // Sensors variables
 int32_t test; // TODO - delete
-uint32_t humidity_inner, humidity_outer, humidity_avg, light_val;
+uint32_t humidity_inner, humidity_outer, humidity_avg, light_val, cumulative_light_percent;
 uint32_t cumulative_light_SUM, cumulative_light_counter, cumulative_light_AVG;
 
 // FLAGS
@@ -105,18 +113,11 @@ void activate_hour_timer(bool on_off)
 {
 	if(on_off)
 	{
-		//SYSCLK->APBCLK.TMR2_EN =1;	//Enable TIMER2 clock source
-		//TIMER2->TCSR.CRST = 1;	//Reset up counter
-		//TIMER2->TCSR.IE = 1; //Enable interrupt
 		TIMER2->TCSR.CEN = 1;		//Enable TIMER2
 	}
 	else
 	{
 		TIMER2->TCSR.CEN = 0;		//Disable TIMER2	
-		//TIMER2->TCSR.CRST = 1;	//Reset up counter
-		//TIMER2->TCSR.IE = 0; //disable interrupt
-		//SYSCLK->APBCLK.TMR2_EN =0;	//Disable TIMER2 clock source
-
 	}
 }
 
@@ -158,8 +159,6 @@ void InitTIMER2(void)
 	/* Step 5. Enable Timer module */
 	TIMER2->TCSR.CRST = 1;		//Reset up counter
 	TIMER2->TCSR.CEN = 0;		//Enable TIMER2
-
-//	TIMER2->TCSR.TDR_EN=1;		// Enable TDR function
 }
 
 
@@ -175,8 +174,6 @@ void TMR2_IRQHandler(void) // Timer1 interrupt subroutine
 		return;
 	}
 	TIMER2->TISR.TIF =1; 	   // to clear the timer flag interrupt
-	//TIMER1->TCSR.CRST = 1;	//Reset up counter
-	//TIMER1->TCSR.CEN = 1;		//Enable TIMER2
 }
 
 void UART_INT_HANDLE(void)
@@ -186,15 +183,8 @@ void UART_INT_HANDLE(void)
 		uart_input=UART0->DATA;
 		comRbuf[comRbytes] = uart_input;
 		comRbytes++;
-		if(comRbytes==1) {	
-			//sprintf(UART_INPUT_TEXT,"%s",comRbuf);
-			//print_lcd(1,UART_INPUT_TEXT);			
-			sprintf(TEXT3+15,"%c",UART0->DATA);
-			print_lcd(1,TEXT3);
-		  comRbytes=0;
-		}
-		// extra conditions
-		switch(uart_input)
+	}
+		switch(comRbuf[0])
 		{
 			case 'c':
 				PUMP_STATUS_OFF;
@@ -202,12 +192,27 @@ void UART_INT_HANDLE(void)
 			case 'C':
 				PUMP_STATUS_ON;
 				break;
+			case 'B':
+				PWM_Servo(0, SHADE_PWM_ON);
+				break;
+			case 'b':
+				PWM_Servo(0, SHADE_PWM_OFF);
+				break;	
+			case '*':
+				switch(comRbuf[1])
+				{
+					case 'W':
+						water_period = comRbuf[2]-0x30;
+						break;
+				}
+				break;	
 			default:
 				//PUMP_STATUS_OFF;
 				break;
 		}
+		comRbytes=0;
 	}
-}
+//}
 
 void send_to_GUI(void)
 {
@@ -236,7 +241,13 @@ void send_to_GUI(void)
 	//send to bluetooth gui
 	DrvUART_Write(UART_PORT0, (uint8_t*)dataout,len);
 	DrvSYS_Delay(mSEC);
-	
+
+	// prepare cumulative light reading for sending
+	len = sprintf(dataout,"%s%d ",LIGHT_CUMULATIVE_PREFIX,cumulative_light_percent); // convert ADC7 value into text
+	//send to bluetooth gui
+	DrvUART_Write(UART_PORT0, (uint8_t*)dataout,len);
+	DrvSYS_Delay(mSEC);
+
 	// print to lcd
 	sprintf(TEXT3+6,"%d ",light_val); // convert ADC7 value into text	
 	print_lcd(3, TEXT3);	   // output TEXT to LCD
@@ -259,11 +270,6 @@ bool is_shade_needed()
 			return false;	
 }
 
-//bool is_watering_time()
-//{
-//
-//}
-
 bool is_sun_down()
 {
 	return(light_val<NIGHT_LIGHT);
@@ -282,7 +288,6 @@ bool is_watering_needed()
 			else
 				return false;
 }
-
 
 void initialization()
 { // start all the decices properly
@@ -324,12 +329,10 @@ void initialization()
 void activate_pump()
 {
 	PUMP_STATUS_ON;
-	DrvSYS_Delay(SEC);
-	DrvSYS_Delay(SEC);
-	DrvSYS_Delay(SEC);
+	for(j=0 ; j<water_period ; j++)
+		DrvSYS_Delay(SEC);
 	PUMP_STATUS_OFF;
 }
-
 
 void gather_data()
 {
@@ -351,17 +354,17 @@ void gather_data()
 	light_val=100-(light_val*100)/4095;
 	
 	cumulative_light_SUM += light_val;
+	cumulative_light_percent = (sampeling_period*cumulative_light_SUM*100)/(MAXIMUM_CUMULATIVE_LIGHT_PER_DAY);
 	cumulative_light_counter++; 
 	cumulative_light_AVG =  cumulative_light_SUM / cumulative_light_counter;
 }
 
 int32_t main (void)
 {
-	initialization();	
-
+	initialization();		
+	
 	while(true)
 	{
-		//while(sample_gap_flag==false); // wait here until timer interrupt occured		
 		gather_data();
 		send_to_GUI();
 		
@@ -372,6 +375,7 @@ int32_t main (void)
 			if(is_watering_needed())
 				activate_pump();
 
-		DrvSYS_Delay(SEC); // TODO - repalce with timer interrupt
+		for(j=0 ; j<sampeling_period ; j++)
+			DrvSYS_Delay(SEC);
 	}
 }
